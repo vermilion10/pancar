@@ -8,6 +8,7 @@ import java.util.Locale
 
 sealed interface StreamStatus {
     data object Idle : StreamStatus
+    data object Preparing : StreamStatus
     data object Connecting : StreamStatus
     data class Live(val since: Long) : StreamStatus
     data class Reconnecting(val since: Long?, val attempt: Int, val reason: String) : StreamStatus
@@ -15,7 +16,7 @@ sealed interface StreamStatus {
 }
 
 val StreamStatus.isActive: Boolean
-    get() = this is StreamStatus.Connecting || this is StreamStatus.Live || this is StreamStatus.Reconnecting
+    get() = this is StreamStatus.Preparing || this is StreamStatus.Connecting || this is StreamStatus.Live || this is StreamStatus.Reconnecting
 
 // Shared state between StreamService (writer) and the UI and bubble (readers).
 object StreamController {
@@ -28,7 +29,19 @@ object StreamController {
     private val _micMuted = MutableStateFlow(false)
     val micMuted: StateFlow<Boolean> = _micMuted.asStateFlow()
 
+    private val _watchUrl = MutableStateFlow<String?>(null)
+    val watchUrl: StateFlow<String?> = _watchUrl.asStateFlow()
+
     private var liveSince: Long? = null
+
+    internal fun preparing() {
+        _watchUrl.value = null
+        _status.value = StreamStatus.Preparing
+    }
+
+    internal fun setWatchUrl(url: String?) {
+        _watchUrl.value = url
+    }
 
     internal fun connecting() {
         liveSince = null
@@ -49,6 +62,7 @@ object StreamController {
     internal fun stopped(failure: String?) {
         liveSince = null
         _bitrate.value = 0
+        _watchUrl.value = null
         _status.value = failure?.let { StreamStatus.Failed(it) } ?: StreamStatus.Idle
     }
 

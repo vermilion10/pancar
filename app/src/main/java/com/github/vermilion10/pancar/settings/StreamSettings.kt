@@ -10,6 +10,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import com.github.vermilion10.pancar.youtube.Privacy
 
 enum class Quality(val label: String, val width: Int, val height: Int, val fps: Int, val bitrate: Int) {
     HD30("720p 30", 1280, 720, 30, 3_000_000),
@@ -29,7 +30,13 @@ enum class Platform(val label: String, val server: String?) {
     }
 }
 
+enum class Destination { YOUTUBE_ACCOUNT, STREAM_KEY }
+
 data class StreamSettings(
+    val destination: Destination = Destination.YOUTUBE_ACCOUNT,
+    val youtubeChannel: String? = null,
+    val broadcastTitle: String = "",
+    val privacy: Privacy = Privacy.UNLISTED,
     val serverUrl: String = Platform.YOUTUBE.server!!,
     val streamKey: String = "",
     val quality: Quality = Quality.HD60,
@@ -37,7 +44,13 @@ data class StreamSettings(
     val micVolume: Float = 1f,
     val gameVolume: Float = 1f,
 ) {
-    val isReady: Boolean get() = serverUrl.isNotBlank() && streamKey.isNotBlank()
+    val isReady: Boolean
+        get() = when (destination) {
+            Destination.YOUTUBE_ACCOUNT -> youtubeChannel != null
+            Destination.STREAM_KEY -> serverUrl.isNotBlank() && streamKey.isNotBlank()
+        }
+
+    val titleOrDefault: String get() = broadcastTitle.trim().ifEmpty { "Live on Pancar" }
 
     val endpoint: String get() = serverUrl.trim().trimEnd('/') + "/" + streamKey.trim()
 
@@ -84,6 +97,10 @@ class SettingsRepository(private val context: Context) {
         val mic = booleanPreferencesKey("mic_enabled")
         val micVolume = floatPreferencesKey("mic_volume")
         val gameVolume = floatPreferencesKey("game_volume")
+        val destination = stringPreferencesKey("destination")
+        val channel = stringPreferencesKey("youtube_channel")
+        val title = stringPreferencesKey("broadcast_title")
+        val privacy = stringPreferencesKey("privacy")
     }
 
     val settings: Flow<StreamSettings> = context.dataStore.data.map(::read)
@@ -96,6 +113,10 @@ class SettingsRepository(private val context: Context) {
             p[Keys.mic] = settings.micEnabled
             p[Keys.micVolume] = settings.micVolume
             p[Keys.gameVolume] = settings.gameVolume
+            p[Keys.destination] = settings.destination.name
+            settings.youtubeChannel?.let { p[Keys.channel] = it } ?: p.remove(Keys.channel)
+            p[Keys.title] = settings.broadcastTitle
+            p[Keys.privacy] = settings.privacy.name
         }
     }
 
@@ -108,6 +129,10 @@ class SettingsRepository(private val context: Context) {
             micEnabled = p[Keys.mic] ?: d.micEnabled,
             micVolume = p[Keys.micVolume] ?: d.micVolume,
             gameVolume = p[Keys.gameVolume] ?: d.gameVolume,
+            destination = Destination.entries.firstOrNull { it.name == p[Keys.destination] } ?: d.destination,
+            youtubeChannel = p[Keys.channel],
+            broadcastTitle = p[Keys.title] ?: d.broadcastTitle,
+            privacy = Privacy.entries.firstOrNull { it.name == p[Keys.privacy] } ?: d.privacy,
         )
     }
 }

@@ -35,6 +35,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
@@ -58,6 +59,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import com.github.vermilion10.pancar.settings.Destination
 import com.github.vermilion10.pancar.settings.Platform
 import com.github.vermilion10.pancar.settings.Quality
 import com.github.vermilion10.pancar.settings.StreamSettings
@@ -65,6 +67,7 @@ import com.github.vermilion10.pancar.stream.StreamStatus
 import com.github.vermilion10.pancar.stream.formatBitrate
 import com.github.vermilion10.pancar.stream.formatElapsed
 import com.github.vermilion10.pancar.stream.isActive
+import com.github.vermilion10.pancar.youtube.Privacy
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
@@ -76,6 +79,11 @@ fun HomeScreen(
     bitrate: Long,
     micMuted: Boolean,
     overlayAllowed: Boolean,
+    watchUrl: String?,
+    signingIn: Boolean,
+    onSignIn: () -> Unit,
+    onSignOut: () -> Unit,
+    onShareWatchUrl: (String) -> Unit,
     onSettingsChange: (StreamSettings) -> Unit,
     onGoLive: () -> Unit,
     onStop: () -> Unit,
@@ -101,7 +109,11 @@ fun HomeScreen(
                         }
                         Spacer(Modifier.width(12.dp))
                     }
-                    if (active) {
+                    if (status is StreamStatus.Preparing) {
+                        Button(onClick = {}, enabled = false, modifier = Modifier.weight(1f).height(52.dp)) {
+                            Text("Preparing…")
+                        }
+                    } else if (active) {
                         Button(
                             onClick = onStop,
                             modifier = Modifier.weight(1f).height(52.dp),
@@ -130,9 +142,9 @@ fun HomeScreen(
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            StatusCard(status, bitrate, onDismissError)
+            StatusCard(status, bitrate, watchUrl, onShareWatchUrl, onDismissError)
             if (!overlayAllowed) OverlayHint(onEnableOverlay)
-            DestinationSection(settings, enabled = !active, onSettingsChange)
+            DestinationSection(settings, enabled = !active, signingIn, onSignIn, onSignOut, onSettingsChange)
             QualitySection(settings, enabled = !active, onSettingsChange)
             AudioSection(settings, enabled = !active, onSettingsChange)
             Spacer(Modifier.height(8.dp))
@@ -141,7 +153,13 @@ fun HomeScreen(
 }
 
 @Composable
-private fun StatusCard(status: StreamStatus, bitrate: Long, onDismissError: () -> Unit) {
+private fun StatusCard(
+    status: StreamStatus,
+    bitrate: Long,
+    watchUrl: String?,
+    onShare: (String) -> Unit,
+    onDismissError: () -> Unit,
+) {
     var now by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
     LaunchedEffect(status) {
         while (status is StreamStatus.Live || status is StreamStatus.Reconnecting) {
@@ -151,7 +169,8 @@ private fun StatusCard(status: StreamStatus, bitrate: Long, onDismissError: () -
     }
     val scheme = MaterialTheme.colorScheme
     val (title, detail, color) = when (status) {
-        StreamStatus.Idle -> Triple("Offline", "Add your stream key, then tap Go live and pick the screen or game to share.", scheme.outline)
+        StreamStatus.Idle -> Triple("Offline", "Tap Go live, then pick the screen or game to share.", scheme.outline)
+        StreamStatus.Preparing -> Triple("Preparing…", "Creating your YouTube broadcast.", scheme.tertiary)
         StreamStatus.Connecting -> Triple("Connecting…", "Starting capture and contacting the server.", scheme.tertiary)
         is StreamStatus.Live -> Triple("LIVE  ${formatElapsed(now - status.since)}", "Sending ${formatBitrate(bitrate)}", scheme.primary)
         is StreamStatus.Reconnecting -> Triple("Reconnecting…", "Attempt ${status.attempt}: ${status.reason}", scheme.tertiary)
@@ -166,6 +185,7 @@ private fun StatusCard(status: StreamStatus, bitrate: Long, onDismissError: () -
                 Text(detail, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
             }
             if (status is StreamStatus.Failed) TextButton(onClick = onDismissError) { Text("OK") }
+            if (watchUrl != null && status.isActive) TextButton(onClick = { onShare(watchUrl) }) { Text("Share link") }
         }
     }
 }
@@ -193,49 +213,127 @@ private fun Section(title: String, content: @Composable ColumnScope.() -> Unit) 
 }
 
 @Composable
-private fun DestinationSection(settings: StreamSettings, enabled: Boolean, onChange: (StreamSettings) -> Unit) {
+private fun DestinationSection(
+    settings: StreamSettings,
+    enabled: Boolean,
+    signingIn: Boolean,
+    onSignIn: () -> Unit,
+    onSignOut: () -> Unit,
+    onChange: (StreamSettings) -> Unit,
+) {
+    Section("Destination") {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(
+                selected = settings.destination == Destination.YOUTUBE_ACCOUNT,
+                enabled = enabled,
+                onClick = { onChange(settings.copy(destination = Destination.YOUTUBE_ACCOUNT)) },
+                label = { Text("YouTube account") },
+            )
+            FilterChip(
+                selected = settings.destination == Destination.STREAM_KEY,
+                enabled = enabled,
+                onClick = { onChange(settings.copy(destination = Destination.STREAM_KEY)) },
+                label = { Text("Stream key") },
+            )
+        }
+        when (settings.destination) {
+            Destination.YOUTUBE_ACCOUNT -> YouTubeAccountFields(settings, enabled, signingIn, onSignIn, onSignOut, onChange)
+            Destination.STREAM_KEY -> StreamKeyFields(settings, enabled, onChange)
+        }
+    }
+}
+
+@Composable
+private fun YouTubeAccountFields(
+    settings: StreamSettings,
+    enabled: Boolean,
+    signingIn: Boolean,
+    onSignIn: () -> Unit,
+    onSignOut: () -> Unit,
+    onChange: (StreamSettings) -> Unit,
+) {
+    val channel = settings.youtubeChannel
+    if (channel == null) {
+        Text(
+            "Sign in once and Pancar creates the YouTube broadcast for you. No stream key to copy.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        OutlinedButton(onClick = onSignIn, enabled = enabled && !signingIn, modifier = Modifier.fillMaxWidth()) {
+            Text(if (signingIn) "Signing in…" else "Sign in with Google")
+        }
+        return
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("Channel", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(channel, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+        }
+        TextButton(onClick = onSignOut, enabled = enabled) { Text("Sign out") }
+    }
+    OutlinedTextField(
+        value = settings.broadcastTitle,
+        onValueChange = { onChange(settings.copy(broadcastTitle = it.take(100))) },
+        label = { Text("Stream title") },
+        placeholder = { Text(settings.titleOrDefault) },
+        singleLine = true,
+        enabled = enabled,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Privacy.entries.forEach { p ->
+            FilterChip(
+                selected = p == settings.privacy,
+                enabled = enabled,
+                onClick = { onChange(settings.copy(privacy = p)) },
+                label = { Text(p.label) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun StreamKeyFields(settings: StreamSettings, enabled: Boolean, onChange: (StreamSettings) -> Unit) {
     var showKey by remember { mutableStateOf(false) }
     val platform = Platform.of(settings.serverUrl)
-    Section("Destination") {
-        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Platform.entries.forEach { p ->
-                FilterChip(
-                    selected = p == platform,
-                    enabled = enabled,
-                    onClick = { p.server?.let { onChange(settings.copy(serverUrl = it)) } },
-                    label = { Text(p.label) },
+    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Platform.entries.forEach { p ->
+            FilterChip(
+                selected = p == platform,
+                enabled = enabled,
+                onClick = { p.server?.let { onChange(settings.copy(serverUrl = it)) } },
+                label = { Text(p.label) },
+            )
+        }
+    }
+    OutlinedTextField(
+        value = settings.serverUrl,
+        onValueChange = { onChange(settings.copy(serverUrl = it.trim())) },
+        label = { Text("Server URL") },
+        singleLine = true,
+        enabled = enabled,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+        modifier = Modifier.fillMaxWidth(),
+    )
+    OutlinedTextField(
+        value = settings.streamKey,
+        onValueChange = { onChange(settings.copy(streamKey = it.trim())) },
+        label = { Text("Stream key") },
+        singleLine = true,
+        enabled = enabled,
+        visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+        trailingIcon = {
+            IconButton(onClick = { showKey = !showKey }) {
+                Icon(
+                    if (showKey) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
+                    contentDescription = if (showKey) "Hide stream key" else "Show stream key",
                 )
             }
-        }
-        OutlinedTextField(
-            value = settings.serverUrl,
-            onValueChange = { onChange(settings.copy(serverUrl = it.trim())) },
-            label = { Text("Server URL") },
-            singleLine = true,
-            enabled = enabled,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-            modifier = Modifier.fillMaxWidth(),
-        )
-        OutlinedTextField(
-            value = settings.streamKey,
-            onValueChange = { onChange(settings.copy(streamKey = it.trim())) },
-            label = { Text("Stream key") },
-            singleLine = true,
-            enabled = enabled,
-            visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-            trailingIcon = {
-                IconButton(onClick = { showKey = !showKey }) {
-                    Icon(
-                        if (showKey) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
-                        contentDescription = if (showKey) "Hide stream key" else "Show stream key",
-                    )
-                }
-            },
-            supportingText = { Text("Copy it from your platform's live dashboard. Never share it.") },
-            modifier = Modifier.fillMaxWidth(),
-        )
-    }
+        },
+        supportingText = { Text("Copy it from your platform's live dashboard. Never share it.") },
+        modifier = Modifier.fillMaxWidth(),
+    )
 }
 
 @Composable
