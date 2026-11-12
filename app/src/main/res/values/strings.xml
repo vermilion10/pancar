@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">Pancar</string>
+    <string name="notif_channel">Live stream</string>
+    <string name="notif_connecting">Connecting…</string>
+    <string name="notif_live">You are live</string>
+    <string name="notif_reconnecting">Reconnecting…</string>
+    <string name="notif_stop">Stop</string>
+</resources>
