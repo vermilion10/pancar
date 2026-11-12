@@ -69,7 +69,7 @@ class LiveBubble(
     ).apply {
         gravity = Gravity.TOP or Gravity.START
         x = dp(16)
-        y = dp(80)
+        y = (context.resources.displayMetrics.heightPixels * 0.4f).toInt()
     }
 
     private val tick = object : Runnable {

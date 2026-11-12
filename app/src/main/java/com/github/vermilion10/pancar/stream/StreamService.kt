@@ -155,7 +155,10 @@ class StreamService : Service(), ConnectChecker {
             is InternalAudioSource -> audio.internalVolume = settings.gameVolume
         }
 
-        s.getStreamClient().setReTries(MAX_RETRIES)
+        s.getStreamClient().apply {
+            setReTries(MAX_RETRIES)
+            setLogs(false)
+        }
         bitrateAdapter = BitrateAdapter { bps -> stream?.setVideoBitrateOnFly(bps) }.apply {
             setMaxBitrate(quality.bitrate)
         }
