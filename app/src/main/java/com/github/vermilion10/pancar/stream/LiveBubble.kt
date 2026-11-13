@@ -9,6 +9,7 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.text.TextUtils
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -23,42 +24,60 @@ class LiveBubble(
     private val context: Context,
     private val hasMic: Boolean,
     private val onToggleMic: () -> Unit,
+    private val onTogglePrivacy: () -> Unit,
     private val onStop: () -> Unit,
 ) {
+    companion object {
+        private const val CHAT_LINES = 3
+    }
+
     private val wm = context.getSystemService(WindowManager::class.java)
     private val handler = Handler(Looper.getMainLooper())
     private val density = context.resources.displayMetrics.density
     private val liveRed = Color.parseColor("#E8452C")
     private val idleGrey = Color.parseColor("#8A8494")
+    private val privacyAmber = Color.parseColor("#F2B84B")
 
     private fun dp(v: Int) = (v * density).toInt()
 
     private val dotShape = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(idleGrey) }
     private val dot = View(context).apply { background = dotShape }
-    private val label = TextView(context).apply {
-        setTextColor(Color.WHITE)
-        textSize = 13f
-        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-    }
+    private val label = boldText()
     private val micButton = action("Mute") { onToggleMic(); refresh() }
+    private val privacyButton = action("Hide") { onTogglePrivacy(); refresh() }
     private val stopButton = action("Stop") { onStop() }
     private val actions = LinearLayout(context).apply {
         orientation = LinearLayout.HORIZONTAL
         visibility = View.GONE
         if (hasMic) addView(micButton)
+        addView(privacyButton)
         addView(stopButton)
     }
-    private val root = LinearLayout(context).apply {
+    private val pill = LinearLayout(context).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
-        setPadding(dp(12), dp(8), dp(12), dp(8))
-        background = GradientDrawable().apply {
-            cornerRadius = dp(20).toFloat()
-            setColor(Color.parseColor("#CC121016"))
-        }
         addView(dot, LinearLayout.LayoutParams(dp(10), dp(10)).apply { marginEnd = dp(8) })
         addView(label)
         addView(actions)
+    }
+    private val chatView = TextView(context).apply {
+        setTextColor(Color.parseColor("#E8E1E9"))
+        textSize = 12f
+        maxWidth = dp(280)
+        maxLines = CHAT_LINES * 2
+        ellipsize = TextUtils.TruncateAt.END
+        visibility = View.GONE
+        setPadding(0, dp(6), 0, 0)
+    }
+    private val root = LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(12), dp(8), dp(12), dp(8))
+        background = GradientDrawable().apply {
+            cornerRadius = dp(18).toFloat()
+            setColor(Color.parseColor("#CC121016"))
+        }
+        addView(pill)
+        addView(chatView)
     }
     private val params = WindowManager.LayoutParams(
         WindowManager.LayoutParams.WRAP_CONTENT,
@@ -79,11 +98,14 @@ class LiveBubble(
         }
     }
 
-    private fun action(text: String, onClick: () -> Unit) = TextView(context).apply {
-        this.text = text
+    private fun boldText() = TextView(context).apply {
         setTextColor(Color.WHITE)
         textSize = 13f
         typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+    }
+
+    private fun action(text: String, onClick: () -> Unit) = boldText().apply {
+        this.text = text
         setPadding(dp(12), dp(4), dp(4), dp(4))
         setOnClickListener { onClick() }
     }
@@ -131,18 +153,24 @@ class LiveBubble(
 
     private fun refresh() {
         val status = StreamController.status.value
-        val text: String
-        val live: Boolean
-        when (status) {
+        val privacy = StreamController.privacy.value
+        val viewers = StreamController.viewers.value
+        val (text, color) = when (status) {
             is StreamStatus.Live -> {
-                text = "LIVE  " + formatElapsed(SystemClock.elapsedRealtime() - status.since)
-                live = true
+                val base = "LIVE  " + formatElapsed(SystemClock.elapsedRealtime() - status.since)
+                val withViewers = if (viewers != null) "$base  ·  $viewers watching" else base
+                withViewers to if (privacy) privacyAmber else liveRed
             }
-            is StreamStatus.Reconnecting -> { text = "Reconnecting"; live = false }
-            else -> { text = "Connecting"; live = false }
+            is StreamStatus.Reconnecting -> "Reconnecting" to idleGrey
+            else -> "Connecting" to idleGrey
         }
-        label.text = text
-        dotShape.setColor(if (live) liveRed else idleGrey)
+        label.text = if (privacy && status is StreamStatus.Live) "$text  ·  hidden" else text
+        dotShape.setColor(color)
         micButton.text = if (StreamController.micMuted.value) "Unmute" else "Mute"
+        privacyButton.text = if (privacy) "Show" else "Hide"
+
+        val lines = StreamController.chat.value.takeLast(CHAT_LINES)
+        chatView.visibility = if (lines.isEmpty()) View.GONE else View.VISIBLE
+        chatView.text = lines.joinToString("\n") { "${it.author}: ${it.text}" }
     }
 }

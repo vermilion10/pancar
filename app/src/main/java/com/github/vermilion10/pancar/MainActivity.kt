@@ -90,6 +90,9 @@ class MainActivity : ComponentActivity() {
                 val bitrate by StreamController.bitrate.collectAsStateWithLifecycle()
                 val micMuted by StreamController.micMuted.collectAsStateWithLifecycle()
                 val watchUrl by StreamController.watchUrl.collectAsStateWithLifecycle()
+                val privacy by StreamController.privacy.collectAsStateWithLifecycle()
+                val viewers by StreamController.viewers.collectAsStateWithLifecycle()
+                val chat by StreamController.chat.collectAsStateWithLifecycle()
 
                 var overlayAllowed by remember { mutableStateOf(Settings.canDrawOverlays(this)) }
                 LifecycleResumeEffect(Unit) {
@@ -109,6 +112,10 @@ class MainActivity : ComponentActivity() {
                     onSignIn = ::signIn,
                     onSignOut = { updateSettings { it.copy(youtubeChannel = null) } },
                     onShareWatchUrl = ::shareLink,
+                    privacy = privacy,
+                    viewers = viewers,
+                    chat = chat,
+                    onTogglePrivacy = { StreamService.togglePrivacy(this) },
                     onSettingsChange = { updated -> updateSettings { updated } },
                     onGoLive = { goLive(settings) },
                     onStop = ::stopStream,
@@ -189,7 +196,7 @@ class MainActivity : ComponentActivity() {
                 val broadcast = YouTubeApi(token).createBroadcast(settings.titleOrDefault, settings.privacy)
                 StreamController.setWatchUrl(broadcast.watchUrl)
                 val target = settings.copy(serverUrl = broadcast.ingestUrl, streamKey = broadcast.streamKey)
-                StreamService.start(this@MainActivity, resultCode, projectionData, target)
+                StreamService.start(this@MainActivity, resultCode, projectionData, target, broadcast)
             } catch (e: YouTubeException) {
                 StreamController.stopped(e.message)
             }

@@ -66,6 +66,12 @@ import com.github.vermilion10.pancar.settings.StreamSettings
 import com.github.vermilion10.pancar.stream.StreamStatus
 import com.github.vermilion10.pancar.stream.formatBitrate
 import com.github.vermilion10.pancar.stream.formatElapsed
+import com.github.vermilion10.pancar.stream.ChatMessage
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
+import androidx.compose.material.icons.rounded.Videocam
+import androidx.compose.material.icons.rounded.VideocamOff
 import com.github.vermilion10.pancar.stream.isActive
 import com.github.vermilion10.pancar.youtube.Privacy
 import kotlinx.coroutines.delay
@@ -84,6 +90,10 @@ fun HomeScreen(
     onSignIn: () -> Unit,
     onSignOut: () -> Unit,
     onShareWatchUrl: (String) -> Unit,
+    privacy: Boolean,
+    viewers: Long?,
+    chat: List<ChatMessage>,
+    onTogglePrivacy: () -> Unit,
     onSettingsChange: (StreamSettings) -> Unit,
     onGoLive: () -> Unit,
     onStop: () -> Unit,
@@ -105,6 +115,15 @@ fun HomeScreen(
                             Icon(
                                 if (micMuted) Icons.Rounded.MicOff else Icons.Rounded.Mic,
                                 contentDescription = if (micMuted) "Unmute microphone" else "Mute microphone",
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
+                    }
+                    if (active && status !is StreamStatus.Preparing) {
+                        FilledTonalIconButton(onClick = onTogglePrivacy) {
+                            Icon(
+                                if (privacy) Icons.Rounded.VideocamOff else Icons.Rounded.Videocam,
+                                contentDescription = if (privacy) "Show your screen again" else "Hide your screen",
                             )
                         }
                         Spacer(Modifier.width(12.dp))
@@ -142,7 +161,8 @@ fun HomeScreen(
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            StatusCard(status, bitrate, watchUrl, onShareWatchUrl, onDismissError)
+            StatusCard(status, bitrate, watchUrl, privacy, viewers, onShareWatchUrl, onDismissError)
+            if (active && settings.destination == Destination.YOUTUBE_ACCOUNT) ChatCard(chat)
             if (!overlayAllowed) OverlayHint(onEnableOverlay)
             DestinationSection(settings, enabled = !active, signingIn, onSignIn, onSignOut, onSettingsChange)
             QualitySection(settings, enabled = !active, onSettingsChange)
@@ -157,6 +177,8 @@ private fun StatusCard(
     status: StreamStatus,
     bitrate: Long,
     watchUrl: String?,
+    privacy: Boolean,
+    viewers: Long?,
     onShare: (String) -> Unit,
     onDismissError: () -> Unit,
 ) {
@@ -172,7 +194,17 @@ private fun StatusCard(
         StreamStatus.Idle -> Triple("Offline", "Tap Go live, then pick the screen or game to share.", scheme.outline)
         StreamStatus.Preparing -> Triple("Preparing…", "Creating your YouTube broadcast.", scheme.tertiary)
         StreamStatus.Connecting -> Triple("Connecting…", "Starting capture and contacting the server.", scheme.tertiary)
-        is StreamStatus.Live -> Triple("LIVE  ${formatElapsed(now - status.since)}", "Sending ${formatBitrate(bitrate)}", scheme.primary)
+        is StreamStatus.Live -> {
+            val parts = buildList {
+                add(if (privacy) "Screen hidden: viewers see Be right back" else "Sending ${formatBitrate(bitrate)}")
+                if (viewers != null) add("$viewers watching")
+            }
+            Triple(
+                "LIVE  ${formatElapsed(now - status.since)}",
+                parts.joinToString("  ·  "),
+                if (privacy) scheme.tertiary else scheme.primary,
+            )
+        }
         is StreamStatus.Reconnecting -> Triple("Reconnecting…", "Attempt ${status.attempt}: ${status.reason}", scheme.tertiary)
         is StreamStatus.Failed -> Triple("Stream stopped", status.reason, scheme.error)
     }
@@ -186,6 +218,31 @@ private fun StatusCard(
             }
             if (status is StreamStatus.Failed) TextButton(onClick = onDismissError) { Text("OK") }
             if (watchUrl != null && status.isActive) TextButton(onClick = { onShare(watchUrl) }) { Text("Share link") }
+        }
+    }
+}
+
+@Composable
+private fun ChatCard(chat: List<ChatMessage>) {
+    val recent = chat.takeLast(20)
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Live chat", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (recent.isEmpty()) {
+                Text("No messages yet.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            recent.forEach { m ->
+                Text(
+                    buildAnnotatedString {
+                        withStyle(SpanStyle(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.secondary)) {
+                            append(m.author)
+                        }
+                        append("  ")
+                        append(m.text)
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
         }
     }
 }

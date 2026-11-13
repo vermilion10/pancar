@@ -10,6 +10,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Typeface
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Handler
@@ -24,6 +28,9 @@ import androidx.core.content.IntentCompat
 import com.github.vermilion10.pancar.MainActivity
 import com.github.vermilion10.pancar.R
 import com.github.vermilion10.pancar.settings.StreamSettings
+import com.github.vermilion10.pancar.youtube.Broadcast
+import com.github.vermilion10.pancar.youtube.YouTubeLiveMonitor
+import com.pedro.encoder.input.gl.render.filters.`object`.ImageFilterRender
 import com.pedro.common.ConnectChecker
 import com.pedro.encoder.input.sources.audio.AudioSource
 import com.pedro.encoder.input.sources.audio.InternalAudioSource
@@ -32,6 +39,10 @@ import com.pedro.encoder.input.sources.audio.SilenceAudioSource
 import com.pedro.encoder.input.sources.video.ScreenSource
 import com.pedro.library.rtmp.RtmpStream
 import com.pedro.library.util.BitrateAdapter
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 
 class StreamService : Service(), ConnectChecker {
 
@@ -40,6 +51,9 @@ class StreamService : Service(), ConnectChecker {
         private const val ACTION_START = "com.github.vermilion10.pancar.action.START"
         private const val ACTION_STOP = "com.github.vermilion10.pancar.action.STOP"
         private const val ACTION_TOGGLE_MIC = "com.github.vermilion10.pancar.action.TOGGLE_MIC"
+        private const val ACTION_TOGGLE_PRIVACY = "com.github.vermilion10.pancar.action.TOGGLE_PRIVACY"
+        private const val EXTRA_BROADCAST_ID = "broadcast_id"
+        private const val EXTRA_CHAT_ID = "live_chat_id"
         private const val EXTRA_RESULT_CODE = "result_code"
         private const val EXTRA_PROJECTION_DATA = "projection_data"
         private const val CHANNEL_ID = "live"
@@ -49,11 +63,19 @@ class StreamService : Service(), ConnectChecker {
         private const val SAMPLE_RATE = 48_000
         private const val AUDIO_BITRATE = 160_000
 
-        fun start(context: Context, resultCode: Int, projectionData: Intent, settings: StreamSettings) {
+        fun start(
+            context: Context,
+            resultCode: Int,
+            projectionData: Intent,
+            settings: StreamSettings,
+            broadcast: Broadcast? = null,
+        ) {
             val intent = Intent(context, StreamService::class.java)
                 .setAction(ACTION_START)
                 .putExtra(EXTRA_RESULT_CODE, resultCode)
                 .putExtra(EXTRA_PROJECTION_DATA, projectionData)
+                .putExtra(EXTRA_BROADCAST_ID, broadcast?.id)
+                .putExtra(EXTRA_CHAT_ID, broadcast?.liveChatId)
             ContextCompat.startForegroundService(context, settings.writeTo(intent))
         }
 
@@ -63,6 +85,10 @@ class StreamService : Service(), ConnectChecker {
 
         fun toggleMic(context: Context) {
             context.startService(Intent(context, StreamService::class.java).setAction(ACTION_TOGGLE_MIC))
+        }
+
+        fun togglePrivacy(context: Context) {
+            context.startService(Intent(context, StreamService::class.java).setAction(ACTION_TOGGLE_PRIVACY))
         }
     }
 
@@ -74,6 +100,9 @@ class StreamService : Service(), ConnectChecker {
     private var bubble: LiveBubble? = null
     private var attempt = 0
     private var stopping = false
+    private var privacyFilter: ImageFilterRender? = null
+    private var monitor: YouTubeLiveMonitor? = null
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -82,6 +111,7 @@ class StreamService : Service(), ConnectChecker {
             ACTION_START -> begin(intent)
             ACTION_STOP -> shutdown()
             ACTION_TOGGLE_MIC -> toggleMic()
+            ACTION_TOGGLE_PRIVACY -> togglePrivacy()
             // A restart without a projection token can't capture anything.
             else -> stopSelf()
         }
@@ -90,6 +120,7 @@ class StreamService : Service(), ConnectChecker {
 
     override fun onDestroy() {
         shutdown()
+        scope.cancel()
         super.onDestroy()
     }
 
@@ -173,9 +204,24 @@ class StreamService : Service(), ConnectChecker {
             return
         }
 
+        intent.getStringExtra(EXTRA_BROADCAST_ID)?.let { videoId ->
+            monitor = YouTubeLiveMonitor(applicationContext, videoId, intent.getStringExtra(EXTRA_CHAT_ID))
+                .also { it.start(scope) }
+        }
+        privacyFilter = ImageFilterRender().apply {
+            setImage(privacyCard(quality.width, quality.height))
+            setScale(100f, 100f)
+            setPosition(0f, 0f)
+        }
+
         if (Settings.canDrawOverlays(this)) {
-            bubble = LiveBubble(this, hasMic = useMic, onToggleMic = ::toggleMic, onStop = { shutdown() })
-                .also { it.show() }
+            bubble = LiveBubble(
+                this,
+                hasMic = useMic,
+                onToggleMic = ::toggleMic,
+                onTogglePrivacy = ::togglePrivacy,
+                onStop = { shutdown() },
+            ).also { it.show() }
         }
     }
 
@@ -185,9 +231,41 @@ class StreamService : Service(), ConnectChecker {
         StreamController.setMicMuted(mic.isMuted())
     }
 
+    // Covers the captured screen with a full-frame card; the capture keeps running underneath.
+    private fun togglePrivacy() {
+        val s = stream ?: return
+        val filter = privacyFilter ?: return
+        val on = !StreamController.privacy.value
+        if (on) s.getGlInterface().addFilter(filter) else s.getGlInterface().removeFilter(filter)
+        StreamController.setPrivacy(on)
+    }
+
+    private fun privacyCard(width: Int, height: Int): Bitmap {
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        canvas.drawColor(0xFF121016.toInt())
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0xFFFFFFFF.toInt()
+            textAlign = Paint.Align.CENTER
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            textSize = height * 0.09f
+        }
+        canvas.drawText("Be right back", width / 2f, height * 0.5f, paint)
+        paint.apply {
+            color = 0xFF8A8494.toInt()
+            typeface = Typeface.DEFAULT
+            textSize = height * 0.04f
+        }
+        canvas.drawText("The stream will continue shortly", width / 2f, height * 0.5f + height * 0.09f, paint)
+        return bitmap
+    }
+
     private fun shutdown(failure: String? = null) {
         if (stopping) return
         stopping = true
+        monitor?.stop()
+        monitor = null
+        privacyFilter = null
         bubble?.dismiss()
         bubble = null
         stream?.let {

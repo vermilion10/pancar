@@ -15,6 +15,8 @@ sealed interface StreamStatus {
     data class Failed(val reason: String) : StreamStatus
 }
 
+data class ChatMessage(val id: String, val author: String, val text: String)
+
 val StreamStatus.isActive: Boolean
     get() = this is StreamStatus.Preparing || this is StreamStatus.Connecting || this is StreamStatus.Live || this is StreamStatus.Reconnecting
 
@@ -32,6 +34,17 @@ object StreamController {
     private val _watchUrl = MutableStateFlow<String?>(null)
     val watchUrl: StateFlow<String?> = _watchUrl.asStateFlow()
 
+    private val _privacy = MutableStateFlow(false)
+    val privacy: StateFlow<Boolean> = _privacy.asStateFlow()
+
+    private val _viewers = MutableStateFlow<Long?>(null)
+    val viewers: StateFlow<Long?> = _viewers.asStateFlow()
+
+    private val _chat = MutableStateFlow<List<ChatMessage>>(emptyList())
+    val chat: StateFlow<List<ChatMessage>> = _chat.asStateFlow()
+
+    private const val CHAT_LIMIT = 100
+
     private var liveSince: Long? = null
 
     internal fun preparing() {
@@ -47,6 +60,9 @@ object StreamController {
         liveSince = null
         _bitrate.value = 0
         _micMuted.value = false
+        _privacy.value = false
+        _viewers.value = null
+        _chat.value = emptyList()
         _status.value = StreamStatus.Connecting
     }
 
@@ -63,7 +79,23 @@ object StreamController {
         liveSince = null
         _bitrate.value = 0
         _watchUrl.value = null
+        _privacy.value = false
+        _viewers.value = null
         _status.value = failure?.let { StreamStatus.Failed(it) } ?: StreamStatus.Idle
+    }
+
+    internal fun setPrivacy(on: Boolean) {
+        _privacy.value = on
+    }
+
+    internal fun setViewers(count: Long?) {
+        _viewers.value = count
+    }
+
+    internal fun addChat(messages: List<ChatMessage>) {
+        if (messages.isEmpty()) return
+        val seen = _chat.value.mapTo(HashSet()) { it.id }
+        _chat.value = (_chat.value + messages.filter { it.id !in seen }).takeLast(CHAT_LIMIT)
     }
 
     internal fun setBitrate(bps: Long) {

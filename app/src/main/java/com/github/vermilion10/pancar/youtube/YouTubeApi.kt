@@ -1,5 +1,6 @@
 package com.github.vermilion10.pancar.youtube
 
+import com.github.vermilion10.pancar.stream.ChatMessage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -7,9 +8,10 @@ import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import java.time.Instant
 
-class YouTubeException(message: String) : Exception(message)
+class YouTubeException(message: String, val httpCode: Int = 0) : Exception(message)
 
 enum class Privacy(val label: String, val apiValue: String) {
     PUBLIC("Public", "public"),
@@ -17,7 +19,7 @@ enum class Privacy(val label: String, val apiValue: String) {
     PRIVATE("Private", "private"),
 }
 
-data class Broadcast(val id: String, val ingestUrl: String, val streamKey: String) {
+data class Broadcast(val id: String, val ingestUrl: String, val streamKey: String, val liveChatId: String?) {
     val watchUrl: String get() = "https://youtu.be/$id"
 }
 
@@ -53,10 +55,40 @@ class YouTubeApi(private val accessToken: String) {
                 .put("enableAutoStop", true)
                 .put("latencyPreference", "low")
                 .put("monitorStream", JSONObject().put("enableMonitorStream", false)))
-        val broadcastId = request("POST", "/liveBroadcasts?part=snippet,status,contentDetails", body).getString("id")
+        val created = request("POST", "/liveBroadcasts?part=snippet,status,contentDetails", body)
+        val broadcastId = created.getString("id")
+        val chatId = created.optJSONObject("snippet")?.optString("liveChatId")?.takeIf { it.isNotBlank() }
         request("POST", "/liveBroadcasts/bind?id=$broadcastId&streamId=${stream.id}&part=id")
         setGamingCategory(broadcastId, title)
-        return Broadcast(broadcastId, stream.ingestUrl, stream.key)
+        return Broadcast(broadcastId, stream.ingestUrl, stream.key, chatId)
+    }
+
+    data class ChatPage(val messages: List<ChatMessage>, val nextPageToken: String?, val pollIntervalMs: Long)
+
+    suspend fun chatMessages(liveChatId: String, pageToken: String?): ChatPage {
+        val page = pageToken?.let { "&pageToken=" + URLEncoder.encode(it, "UTF-8") }.orEmpty()
+        val chat = URLEncoder.encode(liveChatId, "UTF-8")
+        val json = request("GET", "/liveChat/messages?liveChatId=$chat&part=snippet,authorDetails&maxResults=200$page")
+        val items = json.optJSONArray("items") ?: JSONArray()
+        val messages = (0 until items.length()).mapNotNull { i ->
+            val item = items.getJSONObject(i)
+            val text = item.optJSONObject("snippet")?.optString("displayMessage").orEmpty()
+            val author = item.optJSONObject("authorDetails")?.optString("displayName").orEmpty()
+            if (text.isBlank()) null else ChatMessage(item.getString("id"), author, text)
+        }
+        return ChatPage(
+            messages,
+            json.optString("nextPageToken").takeIf { it.isNotBlank() },
+            json.optLong("pollingIntervalMillis", 5_000),
+        )
+    }
+
+    suspend fun concurrentViewers(videoId: String): Long? {
+        val items = request("GET", "/videos?part=liveStreamingDetails&id=$videoId").optJSONArray("items")
+        val details = items?.optJSONObject(0)?.optJSONObject("liveStreamingDetails") ?: return null
+        // YouTube omits the field when nobody is watching.
+        return details.optString("concurrentViewers").toLongOrNull()
+            ?: if (details.has("actualStartTime") && !details.has("actualEndTime")) 0L else null
     }
 
     private data class Stream(val id: String, val ingestUrl: String, val key: String)
@@ -113,7 +145,7 @@ class YouTubeApi(private val accessToken: String) {
                 val code = conn.responseCode
                 val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
                     ?.bufferedReader()?.use { it.readText() }.orEmpty()
-                if (code !in 200..299) throw YouTubeException(errorMessage(code, text))
+                if (code !in 200..299) throw YouTubeException(errorMessage(code, text), code)
                 if (text.isBlank()) JSONObject() else JSONObject(text)
             } catch (e: IOException) {
                 throw YouTubeException("Couldn't reach YouTube: ${e.message}")
