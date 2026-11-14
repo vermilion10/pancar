@@ -116,7 +116,9 @@ class YouTubeApi(private val accessToken: String) {
 
     private fun JSONObject.toStream(): Stream {
         val info = getJSONObject("cdn").getJSONObject("ingestionInfo")
-        return Stream(getString("id"), info.getString("ingestionAddress"), info.getString("streamName"))
+        // RTMPS keeps the stream key off the wire in plain text.
+        val address = info.optString("rtmpsIngestionAddress").ifBlank { info.getString("ingestionAddress") }
+        return Stream(getString("id"), address, info.getString("streamName"))
     }
 
     private suspend fun setGamingCategory(videoId: String, title: String) {

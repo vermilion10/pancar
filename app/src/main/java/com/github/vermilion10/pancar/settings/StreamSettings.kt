@@ -25,7 +25,7 @@ enum class Quality(val label: String, val width: Int, val height: Int, val fps: 
 
 enum class Platform(val label: String, val server: String?, val keyHint: String) {
     YOUTUBE(
-        "YouTube", "rtmp://a.rtmp.youtube.com/live2",
+        "YouTube", "rtmps://a.rtmps.youtube.com/live2",
         "YouTube Studio → Go live → Stream. Copy the stream key.",
     ),
     FACEBOOK(
@@ -39,7 +39,12 @@ enum class Platform(val label: String, val server: String?, val keyHint: String)
     CUSTOM("Custom", null, "Any RTMP or RTMPS server. Paste its URL and key.");
 
     companion object {
+        private const val YOUTUBE_PLAIN = "rtmp://a.rtmp.youtube.com/live2"
+
         fun of(server: String): Platform = entries.firstOrNull { it.server == server } ?: CUSTOM
+
+        // Moves keys saved with YouTube's unencrypted ingest onto RTMPS.
+        fun secure(server: String): String = if (server.trim().trimEnd('/') == YOUTUBE_PLAIN) YOUTUBE.server!! else server
     }
 }
 
@@ -163,7 +168,7 @@ class SettingsRepository(private val context: Context) {
     private fun legacyTargets(p: Preferences, enabled: Boolean): List<KeyTarget> {
         val key = p[Keys.legacyKey].orEmpty()
         if (key.isBlank()) return emptyList()
-        val server = p[Keys.legacyServer] ?: Platform.YOUTUBE.server!!
+        val server = Platform.secure(p[Keys.legacyServer] ?: Platform.YOUTUBE.server!!)
         return listOf(KeyTarget(serverUrl = server, streamKey = key, enabled = enabled))
     }
 
@@ -177,7 +182,7 @@ class SettingsRepository(private val context: Context) {
         val array = JSONArray(json)
         (0 until array.length()).map { i ->
             val o = array.getJSONObject(i)
-            KeyTarget(o.getString("id"), o.optString("server"), o.optString("key"), o.optBoolean("enabled", true))
+            KeyTarget(o.getString("id"), Platform.secure(o.optString("server")), o.optString("key"), o.optBoolean("enabled", true))
         }
     }.getOrDefault(emptyList())
 }

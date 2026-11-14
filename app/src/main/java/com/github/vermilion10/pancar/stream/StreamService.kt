@@ -40,6 +40,7 @@ import com.pedro.encoder.input.sources.video.ScreenSource
 import com.pedro.library.multiple.MultiStream
 import com.pedro.library.multiple.MultiType
 import com.pedro.library.util.BitrateAdapter
+import com.pedro.library.util.streamclient.RtmpStreamClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -222,6 +223,8 @@ class StreamService : Service() {
                 client(i)?.apply {
                     setReTries(MAX_RETRIES)
                     setLogs(false)
+                    // RootEncoder skips hostname checks on RTMPS unless asked.
+                    (this as? RtmpStreamClient)?.setTlsHostVerification(true)
                 }
                 s.startStream(MultiType.RTMP, i, url)
             }
