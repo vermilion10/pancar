@@ -37,14 +37,15 @@ import com.pedro.encoder.input.sources.audio.InternalAudioSource
 import com.pedro.encoder.input.sources.audio.MixAudioSource
 import com.pedro.encoder.input.sources.audio.SilenceAudioSource
 import com.pedro.encoder.input.sources.video.ScreenSource
-import com.pedro.library.rtmp.RtmpStream
+import com.pedro.library.multiple.MultiStream
+import com.pedro.library.multiple.MultiType
 import com.pedro.library.util.BitrateAdapter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 
-class StreamService : Service(), ConnectChecker {
+class StreamService : Service() {
 
     companion object {
         private const val TAG = "StreamService"
@@ -56,6 +57,8 @@ class StreamService : Service(), ConnectChecker {
         private const val EXTRA_CHAT_ID = "live_chat_id"
         private const val EXTRA_RESULT_CODE = "result_code"
         private const val EXTRA_PROJECTION_DATA = "projection_data"
+        private const val EXTRA_NAMES = "destination_names"
+        private const val EXTRA_URLS = "destination_urls"
         private const val CHANNEL_ID = "live"
         private const val NOTIFICATION_ID = 1
         private const val MAX_RETRIES = 10
@@ -70,8 +73,23 @@ class StreamService : Service(), ConnectChecker {
             settings: StreamSettings,
             broadcast: Broadcast? = null,
         ) {
+            val names = ArrayList<String>()
+            val urls = ArrayList<String>()
+            broadcast?.let {
+                names += "YouTube"
+                urls += it.ingestUrl.trimEnd('/') + "/" + it.streamKey
+            }
+            settings.activeTargets.forEach { target ->
+                var name = target.name
+                var n = 2
+                while (name in names) name = "${target.name} ${n++}"
+                names += name
+                urls += target.endpoint
+            }
             val intent = Intent(context, StreamService::class.java)
                 .setAction(ACTION_START)
+                .putStringArrayListExtra(EXTRA_NAMES, names)
+                .putStringArrayListExtra(EXTRA_URLS, urls)
                 .putExtra(EXTRA_RESULT_CODE, resultCode)
                 .putExtra(EXTRA_PROJECTION_DATA, projectionData)
                 .putExtra(EXTRA_BROADCAST_ID, broadcast?.id)
@@ -93,12 +111,12 @@ class StreamService : Service(), ConnectChecker {
     }
 
     private val handler = Handler(Looper.getMainLooper())
-    private var stream: RtmpStream? = null
+    private var stream: MultiStream? = null
     private var projection: MediaProjection? = null
     private var mixSource: MixAudioSource? = null
-    private var bitrateAdapter: BitrateAdapter? = null
     private var bubble: LiveBubble? = null
-    private var attempt = 0
+    private var names: List<String> = emptyList()
+    private var links: List<Link> = emptyList()
     private var stopping = false
     private var privacyFilter: ImageFilterRender? = null
     private var monitor: YouTubeLiveMonitor? = null
@@ -128,6 +146,8 @@ class StreamService : Service(), ConnectChecker {
         if (stream != null) return
         stopping = false
         val settings = StreamSettings.fromIntent(intent)
+        val urls = intent.getStringArrayListExtra(EXTRA_URLS).orEmpty()
+        names = intent.getStringArrayListExtra(EXTRA_NAMES).orEmpty()
         val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
         val data = IntentCompat.getParcelableExtra(intent, EXTRA_PROJECTION_DATA, Intent::class.java)
 
@@ -139,7 +159,11 @@ class StreamService : Service(), ConnectChecker {
         var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
         if (useMic) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
         ServiceCompat.startForeground(this, NOTIFICATION_ID, notification(getString(R.string.notif_connecting), null), types)
-        StreamController.connecting()
+        StreamController.connecting(names)
+        if (urls.isEmpty() || urls.size != names.size) {
+            shutdown("No destination to stream to.")
+            return
+        }
 
         val mp = data?.let {
             getSystemService(MediaProjectionManager::class.java).getMediaProjection(resultCode, it)
@@ -163,7 +187,11 @@ class StreamService : Service(), ConnectChecker {
         }
 
         val quality = settings.quality
-        val s = RtmpStream(this, this, ScreenSource(applicationContext, mp, projectionCallback), audio)
+        links = urls.indices.map { Link(it, quality.bitrate) }
+        val s = MultiStream(
+            this, links.toTypedArray(), emptyArray(), emptyArray(), emptyArray(),
+            ScreenSource(applicationContext, mp, projectionCallback), audio,
+        )
         // MediaProjection only emits frames when the screen changes; keep a steady frame rate for the server.
         s.getGlInterface().setForceRender(true, quality.fps)
         val prepared = try {
@@ -186,18 +214,16 @@ class StreamService : Service(), ConnectChecker {
             is InternalAudioSource -> audio.internalVolume = settings.gameVolume
         }
 
-        s.getStreamClient().apply {
-            setReTries(MAX_RETRIES)
-            setLogs(false)
-        }
-        bitrateAdapter = BitrateAdapter { bps -> stream?.setVideoBitrateOnFly(bps) }.apply {
-            setMaxBitrate(quality.bitrate)
-        }
         stream = s
-        attempt = 0
-
         try {
-            s.startStream(settings.endpoint)
+            // One encoder feeds every destination.
+            urls.forEachIndexed { i, url ->
+                client(i)?.apply {
+                    setReTries(MAX_RETRIES)
+                    setLogs(false)
+                }
+                s.startStream(MultiType.RTMP, i, url)
+            }
         } catch (e: Exception) {
             Log.w(TAG, "startStream failed", e)
             shutdown("Couldn't start the stream: ${e.message}")
@@ -268,11 +294,13 @@ class StreamService : Service(), ConnectChecker {
         privacyFilter = null
         bubble?.dismiss()
         bubble = null
-        stream?.let {
-            if (it.isStreaming) it.stopStream()
-            it.release()
+        stream?.let { s ->
+            links.forEach { link -> if (!link.failed) runCatching { s.stopStream(MultiType.RTMP, link.index) } }
+            if (s.isStreaming) s.stopStream()
+            s.release()
         }
         stream = null
+        links = emptyList()
         mixSource = null
         projection?.stop()
         projection = null
@@ -281,46 +309,93 @@ class StreamService : Service(), ConnectChecker {
         stopSelf()
     }
 
-    // ConnectChecker callbacks arrive on the RTMP thread.
+    private fun client(index: Int) = stream?.getStreamClient(MultiType.RTMP, index)
 
-    override fun onConnectionStarted(url: String) {}
+    // The single encoder runs at the lowest bitrate any healthy destination can take.
+    private fun applyBitrate() {
+        val s = stream ?: return
+        val target = links.filterNot { it.failed }.minOfOrNull { it.wantedBitrate } ?: return
+        s.setVideoBitrateOnFly(target)
+    }
 
-    override fun onConnectionSuccess() {
-        handler.post {
-            val s = stream ?: return@post
-            attempt = 0
-            s.getStreamClient().setReTries(MAX_RETRIES)
-            StreamController.live()
-            updateNotification(getString(R.string.notif_live), (StreamController.status.value as? StreamStatus.Live)?.since)
+    // A destination that runs out of retries drops out; the stream ends only when none are left.
+    private fun dropDestination(link: Link, reason: String) {
+        if (link.failed || stream == null) return
+        link.failed = true
+        runCatching { stream?.stopStream(MultiType.RTMP, link.index) }
+        StreamController.setLink(link.index, LinkState.Failed(reason))
+        if (links.all { it.failed }) {
+            val message = if (links.size == 1) reason
+            else "Every destination failed. " + StreamController.links.value.joinToString("; ") {
+                "${it.name}: ${(it.state as? LinkState.Failed)?.reason}"
+            }
+            shutdown(message)
+        } else {
+            applyBitrate()
+            Log.w(TAG, "${names[link.index]} dropped: $reason")
         }
     }
 
-    override fun onConnectionFailed(reason: String) {
-        handler.post {
-            val s = stream ?: return@post
-            if (s.getStreamClient().reTry(RETRY_DELAY_MS, reason)) {
-                attempt++
-                StreamController.reconnecting(attempt, reason)
-                updateNotification(getString(R.string.notif_reconnecting), null)
-            } else {
-                shutdown("Connection failed: $reason")
+    // ConnectChecker callbacks arrive on the RTMP threads.
+    private inner class Link(val index: Int, maxBitrate: Int) : ConnectChecker {
+        var failed = false
+        var attempt = 0
+        var wantedBitrate = maxBitrate
+        var connected = false
+        var sentBitrate = 0L
+        private val adapter = BitrateAdapter { bps ->
+            wantedBitrate = bps
+            applyBitrate()
+        }.apply { setMaxBitrate(maxBitrate) }
+
+        override fun onConnectionStarted(url: String) {}
+
+        override fun onConnectionSuccess() {
+            handler.post {
+                if (stream == null || failed) return@post
+                attempt = 0
+                connected = true
+                client(index)?.setReTries(MAX_RETRIES)
+                StreamController.setLink(index, LinkState.Live)
+                updateNotification(getString(R.string.notif_live), (StreamController.status.value as? StreamStatus.Live)?.since)
             }
         }
+
+        override fun onConnectionFailed(reason: String) {
+            handler.post {
+                val c = client(index) ?: return@post
+                if (failed) return@post
+                connected = false
+                if (c.reTry(RETRY_DELAY_MS, reason)) {
+                    attempt++
+                    StreamController.setLink(index, LinkState.Reconnecting(attempt, reason))
+                    if (StreamController.status.value !is StreamStatus.Live) {
+                        updateNotification(getString(R.string.notif_reconnecting), null)
+                    }
+                } else {
+                    dropDestination(this, "Connection failed: $reason")
+                }
+            }
+        }
+
+        override fun onNewBitrate(bitrate: Long) {
+            handler.post {
+                val c = client(index) ?: return@post
+                if (failed) return@post
+                sentBitrate = bitrate
+                StreamController.setBitrate(links.filter { it.connected && !it.failed }.minOfOrNull { it.sentBitrate } ?: bitrate)
+                adapter.adaptBitrate(bitrate, c.hasCongestion())
+            }
+        }
+
+        override fun onDisconnect() {}
+
+        override fun onAuthError() {
+            handler.post { dropDestination(this, "The server rejected the stream key.") }
+        }
+
+        override fun onAuthSuccess() {}
     }
-
-    override fun onNewBitrate(bitrate: Long) {
-        StreamController.setBitrate(bitrate)
-        val s = stream ?: return
-        bitrateAdapter?.adaptBitrate(bitrate, s.getStreamClient().hasCongestion())
-    }
-
-    override fun onDisconnect() {}
-
-    override fun onAuthError() {
-        handler.post { shutdown("The server rejected the stream key.") }
-    }
-
-    override fun onAuthSuccess() {}
 
     private fun createChannel() {
         val channel = NotificationChannel(CHANNEL_ID, getString(R.string.notif_channel), NotificationManager.IMPORTANCE_LOW)

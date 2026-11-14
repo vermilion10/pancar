@@ -21,7 +21,6 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
-import com.github.vermilion10.pancar.settings.Destination
 import com.github.vermilion10.pancar.settings.SettingsRepository
 import com.github.vermilion10.pancar.settings.StreamSettings
 import com.github.vermilion10.pancar.stream.StreamController
@@ -51,10 +50,8 @@ class MainActivity : ComponentActivity() {
             pending = null
             val data = result.data
             if (result.resultCode != RESULT_OK || data == null) return@registerForActivityResult
-            when (settings.destination) {
-                Destination.STREAM_KEY -> StreamService.start(this, result.resultCode, data, settings)
-                Destination.YOUTUBE_ACCOUNT -> startYouTube(settings, result.resultCode, data)
-            }
+            if (settings.useYouTube) startYouTube(settings, result.resultCode, data)
+            else StreamService.start(this, result.resultCode, data, settings)
         }
 
     // Proceeds even if denied: the stream then runs without audio or without the notification.
@@ -93,6 +90,7 @@ class MainActivity : ComponentActivity() {
                 val privacy by StreamController.privacy.collectAsStateWithLifecycle()
                 val viewers by StreamController.viewers.collectAsStateWithLifecycle()
                 val chat by StreamController.chat.collectAsStateWithLifecycle()
+                val links by StreamController.links.collectAsStateWithLifecycle()
 
                 var overlayAllowed by remember { mutableStateOf(Settings.canDrawOverlays(this)) }
                 LifecycleResumeEffect(Unit) {
@@ -115,6 +113,7 @@ class MainActivity : ComponentActivity() {
                     privacy = privacy,
                     viewers = viewers,
                     chat = chat,
+                    links = links,
                     onTogglePrivacy = { StreamService.togglePrivacy(this) },
                     onSettingsChange = { updated -> updateSettings { updated } },
                     onGoLive = { goLive(settings) },
@@ -195,8 +194,7 @@ class MainActivity : ComponentActivity() {
                 }
                 val broadcast = YouTubeApi(token).createBroadcast(settings.titleOrDefault, settings.privacy)
                 StreamController.setWatchUrl(broadcast.watchUrl)
-                val target = settings.copy(serverUrl = broadcast.ingestUrl, streamKey = broadcast.streamKey)
-                StreamService.start(this@MainActivity, resultCode, projectionData, target, broadcast)
+                StreamService.start(this@MainActivity, resultCode, projectionData, settings, broadcast)
             } catch (e: YouTubeException) {
                 StreamController.stopped(e.message)
             }

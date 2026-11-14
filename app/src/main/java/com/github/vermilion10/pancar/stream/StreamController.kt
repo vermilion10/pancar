@@ -17,6 +17,15 @@ sealed interface StreamStatus {
 
 data class ChatMessage(val id: String, val author: String, val text: String)
 
+sealed interface LinkState {
+    data object Connecting : LinkState
+    data object Live : LinkState
+    data class Reconnecting(val attempt: Int, val reason: String) : LinkState
+    data class Failed(val reason: String) : LinkState
+}
+
+data class DestinationLink(val name: String, val state: LinkState)
+
 val StreamStatus.isActive: Boolean
     get() = this is StreamStatus.Preparing || this is StreamStatus.Connecting || this is StreamStatus.Live || this is StreamStatus.Reconnecting
 
@@ -43,6 +52,9 @@ object StreamController {
     private val _chat = MutableStateFlow<List<ChatMessage>>(emptyList())
     val chat: StateFlow<List<ChatMessage>> = _chat.asStateFlow()
 
+    private val _links = MutableStateFlow<List<DestinationLink>>(emptyList())
+    val links: StateFlow<List<DestinationLink>> = _links.asStateFlow()
+
     private const val CHAT_LIMIT = 100
 
     private var liveSince: Long? = null
@@ -56,8 +68,9 @@ object StreamController {
         _watchUrl.value = url
     }
 
-    internal fun connecting() {
+    internal fun connecting(names: List<String>) {
         liveSince = null
+        _links.value = names.map { DestinationLink(it, LinkState.Connecting) }
         _bitrate.value = 0
         _micMuted.value = false
         _privacy.value = false
@@ -66,13 +79,19 @@ object StreamController {
         _status.value = StreamStatus.Connecting
     }
 
-    internal fun live() {
-        val since = liveSince ?: SystemClock.elapsedRealtime().also { liveSince = it }
-        _status.value = StreamStatus.Live(since)
-    }
-
-    internal fun reconnecting(attempt: Int, reason: String) {
-        _status.value = StreamStatus.Reconnecting(liveSince, attempt, reason)
+    // Overall status follows the healthiest destination.
+    internal fun setLink(index: Int, state: LinkState) {
+        val links = _links.value.toMutableList()
+        if (index !in links.indices) return
+        links[index] = links[index].copy(state = state)
+        _links.value = links
+        val live = links.any { it.state is LinkState.Live }
+        val retrying = links.mapNotNull { it.state as? LinkState.Reconnecting }.maxByOrNull { it.attempt }
+        _status.value = when {
+            live -> StreamStatus.Live(liveSince ?: SystemClock.elapsedRealtime().also { liveSince = it })
+            retrying != null -> StreamStatus.Reconnecting(liveSince, retrying.attempt, retrying.reason)
+            else -> StreamStatus.Connecting
+        }
     }
 
     internal fun stopped(failure: String?) {
@@ -81,6 +100,7 @@ object StreamController {
         _watchUrl.value = null
         _privacy.value = false
         _viewers.value = null
+        _links.value = emptyList()
         _status.value = failure?.let { StreamStatus.Failed(it) } ?: StreamStatus.Idle
     }
 

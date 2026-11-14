@@ -159,7 +159,10 @@ class LiveBubble(
             is StreamStatus.Live -> {
                 val base = "LIVE  " + formatElapsed(SystemClock.elapsedRealtime() - status.since)
                 val withViewers = if (viewers != null) "$base  ·  $viewers watching" else base
-                withViewers to if (privacy) privacyAmber else liveRed
+                val links = StreamController.links.value
+                val up = links.count { it.state is LinkState.Live }
+                val withLinks = if (up < links.size) "$withViewers  ·  $up/${links.size} up" else withViewers
+                withLinks to if (privacy) privacyAmber else liveRed
             }
             is StreamStatus.Reconnecting -> "Reconnecting" to idleGrey
             else -> "Connecting" to idleGrey
