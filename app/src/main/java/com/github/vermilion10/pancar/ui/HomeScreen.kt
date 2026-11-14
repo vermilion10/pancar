@@ -198,7 +198,7 @@ private fun StatusCard(
     }
     val scheme = MaterialTheme.colorScheme
     val (title, detail, color) = when (status) {
-        StreamStatus.Idle -> Triple("Offline", "Tap Go live, then pick the screen or game to share.", scheme.outline)
+        StreamStatus.Idle -> Triple("Offline", "Go live first, then open your game so its sound is captured.", scheme.outline)
         StreamStatus.Preparing -> Triple("Preparing…", "Creating your YouTube broadcast.", scheme.tertiary)
         StreamStatus.Connecting -> Triple("Connecting…", "Starting capture and contacting the server.", scheme.tertiary)
         is StreamStatus.Live -> {
@@ -523,7 +523,7 @@ private fun AudioSection(settings: StreamSettings, enabled: Boolean, onChange: (
             VolumeSlider("Mic volume", settings.micVolume, enabled) { onChange(settings.copy(micVolume = it)) }
         }
         Text(
-            "Some games block audio capture. If yours is silent on stream, the game has opted out.",
+            "Game sound is only captured if the game starts after you go live. If it was already open, close and reopen it.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
