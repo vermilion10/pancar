@@ -33,3 +33,7 @@ YouTube sign-in requires an Android OAuth client in Google Cloud Console, set up
 - [RootEncoder](https://github.com/pedroSG94/RootEncoder)
 - [Google Identity Services](https://developers.google.com/identity/authorization/android)
 - [YouTube Data API v3](https://developers.google.com/youtube/v3)
+
+## License
+
+[MIT](LICENSE)
