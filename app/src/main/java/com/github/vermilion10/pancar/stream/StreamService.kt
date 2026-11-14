@@ -119,6 +119,7 @@ class StreamService : Service() {
     private var links: List<Link> = emptyList()
     private var stopping = false
     private var privacyFilter: ImageFilterRender? = null
+    private var privacyBitmap: Bitmap? = null
     private var monitor: YouTubeLiveMonitor? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
@@ -234,11 +235,7 @@ class StreamService : Service() {
             monitor = YouTubeLiveMonitor(applicationContext, videoId, intent.getStringExtra(EXTRA_CHAT_ID))
                 .also { it.start(scope) }
         }
-        privacyFilter = ImageFilterRender().apply {
-            setImage(privacyCard(quality.width, quality.height))
-            setScale(100f, 100f)
-            setPosition(0f, 0f)
-        }
+        privacyBitmap = privacyCard(quality.width, quality.height)
 
         if (Settings.canDrawOverlays(this)) {
             bubble = LiveBubble(
@@ -260,9 +257,21 @@ class StreamService : Service() {
     // Covers the captured screen with a full-frame card; the capture keeps running underneath.
     private fun togglePrivacy() {
         val s = stream ?: return
-        val filter = privacyFilter ?: return
+        val card = privacyBitmap ?: return
         val on = !StreamController.privacy.value
-        if (on) s.getGlInterface().addFilter(filter) else s.getGlInterface().removeFilter(filter)
+        if (on) {
+            // removeFilter releases the texture and sprite, so each hide needs a fresh filter.
+            val filter = ImageFilterRender().apply {
+                setImage(card)
+                setScale(100f, 100f)
+                setPosition(0f, 0f)
+            }
+            privacyFilter = filter
+            s.getGlInterface().addFilter(filter)
+        } else {
+            privacyFilter?.let { s.getGlInterface().removeFilter(it) }
+            privacyFilter = null
+        }
         StreamController.setPrivacy(on)
     }
 
@@ -292,6 +301,7 @@ class StreamService : Service() {
         monitor?.stop()
         monitor = null
         privacyFilter = null
+        privacyBitmap = null
         bubble?.dismiss()
         bubble = null
         stream?.let { s ->
