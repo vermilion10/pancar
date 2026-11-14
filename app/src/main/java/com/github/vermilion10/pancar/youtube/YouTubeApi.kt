@@ -1,5 +1,6 @@
 package com.github.vermilion10.pancar.youtube
 
+import android.util.Log
 import com.github.vermilion10.pancar.stream.ChatMessage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -27,6 +28,7 @@ data class Broadcast(val id: String, val ingestUrl: String, val streamKey: Strin
 class YouTubeApi(private val accessToken: String) {
 
     companion object {
+        private const val TAG = "YouTubeApi"
         private const val BASE = "https://www.googleapis.com/youtube/v3"
         private const val STREAM_TITLE = "Pancar"
         private const val CATEGORY_GAMING = "20"
@@ -43,6 +45,7 @@ class YouTubeApi(private val accessToken: String) {
     // Creates a broadcast that starts as soon as video arrives and ends when the stream stops.
     suspend fun createBroadcast(title: String, privacy: Privacy): Broadcast {
         val stream = reusableStream()
+        releaseStream(stream.id)
         val body = JSONObject()
             .put("snippet", JSONObject()
                 .put("title", title)
@@ -61,6 +64,29 @@ class YouTubeApi(private val accessToken: String) {
         request("POST", "/liveBroadcasts/bind?id=$broadcastId&streamId=${stream.id}&part=id")
         setGamingCategory(broadcastId, title)
         return Broadcast(broadcastId, stream.ingestUrl, stream.key, chatId)
+    }
+
+    // Video goes to whichever broadcast on the stream is already live, so older ones must let go first.
+    private suspend fun releaseStream(streamId: String) {
+        for (filter in listOf("active", "upcoming")) {
+            val items = runCatching {
+                request("GET", "/liveBroadcasts?part=id,status,contentDetails&broadcastStatus=$filter&broadcastType=all&maxResults=50")
+            }.getOrNull()?.optJSONArray("items") ?: continue
+            for (i in 0 until items.length()) {
+                val item = items.getJSONObject(i)
+                if (item.optJSONObject("contentDetails")?.optString("boundStreamId") != streamId) continue
+                val id = item.getString("id")
+                val lifeCycle = item.optJSONObject("status")?.optString("lifeCycleStatus")
+                runCatching {
+                    if (lifeCycle == "live" || lifeCycle == "testing") {
+                        request("POST", "/liveBroadcasts/transition?broadcastStatus=complete&id=$id&part=id")
+                    } else {
+                        // Unbinding keeps the broadcast but stops it from catching Pancar's video.
+                        request("POST", "/liveBroadcasts/bind?id=$id&part=id")
+                    }
+                }.onFailure { Log.w(TAG, "Couldn't release broadcast $id: ${it.message}") }
+            }
+        }
     }
 
     data class ChatPage(val messages: List<ChatMessage>, val nextPageToken: String?, val pollIntervalMs: Long)
